@@ -45,7 +45,10 @@ struct Context {
     auto & constrained_nodes =
         mesh->getElementGroup("bot").getNodeGroup().getNodes();
     for (auto & node : constrained_nodes) {
+      // constrained_dofs.push_back(node * dim);     // Adds _x dof
       constrained_dofs.push_back(node * dim + 1); // Adds _y dof
+      std::cout << "Constrained node: " << node << std::endl;
+      std::cout << "Constrained DOF: " << node * dim + 1 << std::endl;
     }
   };
 };
@@ -152,7 +155,7 @@ PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec c,
   // Extract the context
   Context * context = static_cast<Context *>(ctx);
 
-  VecSet(c, PETSC_NINFINITY);
+  VecSet(c, PETSC_INFINITY);
 
   Array<Real> initial_pos(context->constrained_dofs.size());
   Array<Real> current_displ(context->constrained_dofs.size());
@@ -161,6 +164,13 @@ PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec c,
                context->constrained_dofs.data(), initial_pos.data());
   VecGetValues(x, context->constrained_dofs.size(),
                context->constrained_dofs.data(), current_displ.data());
+
+  // Debugging output
+  // for (PetscInt i = 0; i < context->constrained_dofs.size(); ++i) {
+  //  std::cout << "Initial Pos[" << i << "]: " << initial_pos[i]
+  //            << ", Current Displ[" << i << "]: " << current_displ[i]
+  //            << std::endl;
+  //}
 
   // Add initial positions to the constraint vector (c = x0)
   VecSetValues(c, context->constrained_dofs.size(),
@@ -172,17 +182,8 @@ PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec c,
                context->constrained_dofs.data(), current_displ.data(),
                ADD_VALUES);
 
-  // Scale so that c >= 0 becomes c <= 0
+  // Scale so that c >= 0 becomes -c <= 0
   VecScale(c, -1.0);
-
-  //// Set the constraint to zero (c = 0)
-  // VecSet(c, 0.0);
-  //// Add initial positions to c (c = x0)
-  // VecCopy(initial_positions, c);
-  //// Add displacement to c (c = x0 + x)
-  // VecAXPY(c, 1.0, x);
-  //// Scale so that c >= 0 becomes c <= 0
-  // VecScale(c, -1.0);
 
   VecView(c, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the vector
 
@@ -192,18 +193,41 @@ PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec c,
 /* ----------------------------------------------------------------------- */
 
 PetscErrorCode EvaluateInequalityJacobian(Tao /*tao*/, Vec x, Mat J,
-                                          Mat /*pre*/, void * ctx) {
-  PetscInt size;
-  VecGetSize(x, &size);
+                                          Mat /*Jpre*/, void * ctx) {
 
-  MatZeroEntries(J); // Clear the matrix before setting it to identity
-  for (PetscInt i = 0; i < size; ++i) {
-    MatSetValue(J, i, i, 1.0, INSERT_VALUES);
+  Context * context = static_cast<Context *>(ctx);
+
+  PetscInt n = context->constrained_dofs.size();
+
+  MatZeroEntries(J);
+  // MatZeroEntries(Jpre);
+
+  for (PetscInt i = 0; i < n; ++i) {
+    PetscInt dof = context->constrained_dofs[i];
+    MatSetValue(J, dof, dof, -1.0, ADD_VALUES);
+    // MatSetValue(Jpre, dof, dof, -1.0, ADD_VALUES);
   }
+
   MatAssemblyBegin(J, MAT_FINAL_ASSEMBLY);
   MatAssemblyEnd(J, MAT_FINAL_ASSEMBLY);
+  // MatAssemblyBegin(Jpre, MAT_FINAL_ASSEMBLY);
+  // MatAssemblyEnd(Jpre, MAT_FINAL_ASSEMBLY);
 
-  MatScale(J, -1.0);
+  // Print the matrix J
+  // MatView(J, PETSC_VIEWER_STDOUT_WORLD);
+  // MatView(Jpre, PETSC_VIEWER_STDOUT_WORLD);
+
+  // PetscInt size;
+  // VecGetSize(x, &size);
+  //
+  // MatZeroEntries(J); // Clear the matrix before setting it to identity
+  // for (PetscInt i = 0; i < size; ++i) {
+  //  MatSetValue(J, i, i, 1.0, INSERT_VALUES);
+  //}
+  // MatAssemblyBegin(J, MAT_FINAL_ASSEMBLY);
+  // MatAssemblyEnd(J, MAT_FINAL_ASSEMBLY);
+  //
+  // MatScale(J, -1.0);
 
   return 0;
 }
@@ -220,7 +244,7 @@ void solve(Tao & tao, Context * ctx) {
 
   tss.assembleMatrix("J");
   auto & x = dynamic_cast<SolverVectorPETSc &>(dof_manager.getSolution());
-  x.zero();
+  // x.zero();
 
   auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
   rhs.zero();
@@ -236,6 +260,7 @@ void solve(Tao & tao, Context * ctx) {
   c.resize();
   SparseMatrixPETSc Ji(dof_manager, _mt_not_defined, "Ji");
   Ji.resize();
+
   TaoSetInequalityConstraintsRoutine(tao, c, EvaluateInequalityConstraints,
                                      ctx);
   TaoSetJacobianInequalityRoutine(tao, Ji, Ji, EvaluateInequalityJacobian, ctx);
@@ -296,7 +321,7 @@ int main(int argc, char * argv[]) {
   model.dump();
 
   // Boundary conditions
-  model.applyBC(BC::Dirichlet::FixedValue(-4e-3, _y), "top");
+  model.applyBC(BC::Dirichlet::FixedValue(-1e-3, _y), "top");
   model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "left");
 
   // Initialize the context
@@ -312,8 +337,8 @@ int main(int argc, char * argv[]) {
   TaoSetFromOptions(tao);
 
   // Set solver tolerances and maximum iterations
-  TaoSetTolerances(tao, 1e-4, 1e-4, 1e-4);
-  TaoSetMaximumIterations(tao, 5e3);
+  TaoSetTolerances(tao, 1e-3, 1e-3, 1e-3);
+  TaoSetMaximumIterations(tao, 1e3);
 
   // Enable debugging output
   PetscOptionsSetValue(NULL, "-tao_monitor", NULL);
