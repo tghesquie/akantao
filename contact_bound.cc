@@ -85,29 +85,66 @@ void assembleJacobian(Vec x, Mat J, void * ctx) {
 
 /* ----------------------------------------------------------------------- */
 
+// PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
+//                                     Vec grad, void * ctx) {
+//   // Extract the context
+//   Context * context = static_cast<Context *>(ctx);
+//   DOFManagerPETSc & dof_manager = *context->dof_manager;
+//
+//   // Compute the objective and gradient
+//   auto & K = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
+//   auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
+//
+//   // Assemble the residual
+//   assembleResidual(x, rhs, ctx);
+//   assembleJacobian(x, K, ctx);
+//   SolverVectorPETSc Kx(x, aka::as_type<DOFManagerPETSc>(dof_manager), "Kx");
+//
+//   Real fx;
+//   Real xKx;
+//
+//   MatMult(K, x, Kx);
+//   VecWAXPY(grad, 1, Kx, rhs);
+//   VecDot(rhs, x, &fx);
+//   VecDot(x, Kx, &xKx);
+//   *obj = 0.5 * xKx + fx;
+//
+//   return 0;
+// }
+
+/* ----------------------------------------------------------------------- */
+
 PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
                                     Vec grad, void * ctx) {
   // Extract the context
   Context * context = static_cast<Context *>(ctx);
   DOFManagerPETSc & dof_manager = *context->dof_manager;
+  SolidMechanicsModel & model = *context->model;
 
   // Compute the objective and gradient
   auto & K = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
-  auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
+  auto & f = model.getExternalForce();
+  SolverVectorPETSc rhs(dof_manager, "rhs");
+  rhs.resize();
+  // Fill the rhs vector
+  for (auto i = 0; i < f.size(); i++) {
+    VecSetValue(rhs, 2 * i, f(i, 0), INSERT_VALUES);     // First column
+    VecSetValue(rhs, 2 * i + 1, f(i, 1), INSERT_VALUES); // Second column
+  }
+  VecAssemblyBegin(rhs);
+  VecAssemblyEnd(rhs);
 
-  // Assemble the residual
-  assembleResidual(x, rhs, ctx);
-  assembleJacobian(x, K, ctx);
+  assembleJacobian(x, K, context);
   SolverVectorPETSc Kx(x, aka::as_type<DOFManagerPETSc>(dof_manager), "Kx");
 
   Real fx;
   Real xKx;
 
   MatMult(K, x, Kx);
-  VecWAXPY(grad, 1, Kx, rhs);
+  VecWAXPY(grad, -1, rhs, Kx);
   VecDot(rhs, x, &fx);
   VecDot(x, Kx, &xKx);
-  *obj = 0.5 * xKx + fx;
+  *obj = 0.5 * xKx - fx;
 
   return 0;
 }
@@ -159,16 +196,17 @@ void solve(Tao & tao, void * ctx) {
   Context * context = static_cast<Context *>(ctx);
   DOFManagerPETSc & dof_manager = *context->dof_manager;
   TimeStepSolver & tss = *context->tss;
+  SolidMechanicsModel & model = *context->model;
 
   tss.beforeSolveStep();
   dof_manager.updateGlobalBlockedDofs();
 
   tss.assembleMatrix("J");
   auto & x = dynamic_cast<SolverVectorPETSc &>(dof_manager.getSolution());
-  x.zero();
+  // x.zero();
 
-  auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
-  rhs.zero();
+  // auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
+  // rhs.zero();
 
   auto & J = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
 
@@ -215,7 +253,7 @@ int main(int argc, char * argv[]) {
   initialize("material.dat", argc, argv);
 
   Mesh mesh(dim);
-  mesh.read("square_L0.01_P1.msh");
+  mesh.read("square_L0.01_P1_dy0_lc0.001.msh");
 
   SolidMechanicsModel model(mesh);
 
@@ -232,8 +270,13 @@ int main(int argc, char * argv[]) {
   model.dump();
 
   // Boundary conditions
-  model.applyBC(BC::Dirichlet::FixedValue(-1e-3, _y), "top");
-  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "left");
+  Vector<Real> traction(dim);
+  traction.zero();
+  traction(_y) = -5e2;
+  model.applyBC(BC::Dirichlet::FixedValue(2e-3, _y), "top");
+  // model.applyBC(BC::Neumann::FromTraction(traction), "top");
+  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "top");
+  // model.applyBC(BC::Dirichlet::FixedValue(1e-3, _x), "right");
 
   // Initialize the context
   TimeStepSolver & tss = dof_manager.getTimeStepSolver("static");
@@ -252,15 +295,17 @@ int main(int argc, char * argv[]) {
   setBounds(tao, &ctx);
 
   // Set solver tolerances and maximum iterations
-  TaoSetTolerances(tao, 1e-6, 1e-6, 1e-6);
+  TaoSetTolerances(tao, 1e-16, 1e-16, 1e-16);
+  TaoSetConstraintTolerances(tao, 1e-16, 0);
   TaoSetMaximumIterations(tao, 500);
 
   // Enable debugging output
   PetscOptionsSetValue(NULL, "-tao_monitor", NULL);
   PetscOptionsSetValue(NULL, "-tao_view", NULL);
 
-  // Solve the problem
+  tss.beforeSolveStep();
   solve(tao, &ctx);
+  tss.afterSolveStep(true);
 
   model.dump();
 

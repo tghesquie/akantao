@@ -20,6 +20,9 @@ struct Context {
   Mesh * mesh;
   SolverVectorPETSc initial_positions;
   Array<Idx> constrained_dofs;
+  PetscInt n, ni;
+  Vec ci;
+  Mat Ai;
 
   // Constructor to initialize all members
   Context(DOFManagerPETSc * dof_manager, TimeStepSolver * tss,
@@ -50,6 +53,10 @@ struct Context {
       std::cout << "Constrained node: " << node << std::endl;
       std::cout << "Constrained DOF: " << node * dim + 1 << std::endl;
     }
+
+    // Set the number of DOFs and constraints
+    n = dof_manager->getPureLocalSystemSize();
+    ni = constrained_dofs.size();
   };
 };
 
@@ -141,7 +148,8 @@ PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
 
 /* ----------------------------------------------------------------------- */
 
-PetscErrorCode FormHessian(Tao /*tao*/, Vec x, Mat H, Mat /*pre*/, void * ctx) {
+PetscErrorCode FormHessian(Tao /*tao*/, Vec x, Mat H, Mat /*Hpre*/,
+                           void * ctx) {
   // Assemble the Jacobian
   assembleJacobian(x, H, ctx);
 
@@ -150,86 +158,73 @@ PetscErrorCode FormHessian(Tao /*tao*/, Vec x, Mat H, Mat /*pre*/, void * ctx) {
 
 /* ----------------------------------------------------------------------- */
 
-PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec c,
+PetscErrorCode EvaluateInequalityConstraints(Tao /*tao*/, Vec x, Vec ci,
                                              void * ctx) {
+
+  PetscFunctionBegin;
+
   // Extract the context
   Context * context = static_cast<Context *>(ctx);
+  PetscInt ni = context->ni;
 
-  VecSet(c, PETSC_INFINITY);
+  VecSet(ci, 0.0);
 
-  Array<Real> initial_pos(context->constrained_dofs.size());
-  Array<Real> current_displ(context->constrained_dofs.size());
+  Array<Real> initial_pos(ni);
+  Array<Real> current_displ(ni);
 
-  VecGetValues(context->initial_positions, context->constrained_dofs.size(),
-               context->constrained_dofs.data(), initial_pos.data());
-  VecGetValues(x, context->constrained_dofs.size(),
-               context->constrained_dofs.data(), current_displ.data());
+  VecGetValues(context->initial_positions, ni, context->constrained_dofs.data(),
+               initial_pos.data());
+  VecGetValues(x, ni, context->constrained_dofs.data(), current_displ.data());
 
-  // Debugging output
-  // for (PetscInt i = 0; i < context->constrained_dofs.size(); ++i) {
-  //  std::cout << "Initial Pos[" << i << "]: " << initial_pos[i]
-  //            << ", Current Displ[" << i << "]: " << current_displ[i]
-  //            << std::endl;
-  //}
+  // Print the current displacements and the initial positions
+  std::cout << "Initial positions: ";
+  for (PetscInt i = 0; i < ni; ++i) {
+    std::cout << initial_pos[i] << " ";
+  }
+  std::cout << std::endl;
 
-  // Add initial positions to the constraint vector (c = x0)
-  VecSetValues(c, context->constrained_dofs.size(),
-               context->constrained_dofs.data(), initial_pos.data(),
-               INSERT_VALUES);
+  std::cout << "Current displacements: ";
+  for (PetscInt i = 0; i < ni; ++i) {
+    std::cout << current_displ[i] << " ";
+  }
+  std::cout << std::endl;
 
-  // Add displacement to the constraint vector (c = x0 + x)
-  VecSetValues(c, context->constrained_dofs.size(),
-               context->constrained_dofs.data(), current_displ.data(),
-               ADD_VALUES);
+  for (PetscInt i = 0; i < ni; ++i) {
+    VecSetValue(ci, i, initial_pos[i] + current_displ[i], INSERT_VALUES);
+  }
 
-  // Scale so that c >= 0 becomes -c <= 0
-  VecScale(c, -1.0);
+  // VecScale(c, -1.0);
 
-  VecView(c, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the vector
+  VecAssemblyBegin(ci);
+  VecAssemblyEnd(ci);
 
-  return 0;
+  VecView(ci, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the vector
+
+  PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 /* ----------------------------------------------------------------------- */
 
-PetscErrorCode EvaluateInequalityJacobian(Tao /*tao*/, Vec x, Mat J,
-                                          Mat /*Jpre*/, void * ctx) {
+PetscErrorCode EvaluateInequalityJacobian(Tao /*tao*/, Vec x, Mat Ai,
+                                          Mat /*Apre*/, void * ctx) {
+  PetscFunctionBegin;
 
   Context * context = static_cast<Context *>(ctx);
+  PetscInt ni = context->ni;
 
-  PetscInt n = context->constrained_dofs.size();
+  MatZeroEntries(Ai);
 
-  MatZeroEntries(J);
-  // MatZeroEntries(Jpre);
-
-  for (PetscInt i = 0; i < n; ++i) {
+  for (PetscInt i = 0; i < ni; ++i) {
     PetscInt dof = context->constrained_dofs[i];
-    MatSetValue(J, dof, dof, -1.0, ADD_VALUES);
-    // MatSetValue(Jpre, dof, dof, -1.0, ADD_VALUES);
+    MatSetValue(Ai, i, dof, 1.0, ADD_VALUES);
   }
 
-  MatAssemblyBegin(J, MAT_FINAL_ASSEMBLY);
-  MatAssemblyEnd(J, MAT_FINAL_ASSEMBLY);
-  // MatAssemblyBegin(Jpre, MAT_FINAL_ASSEMBLY);
-  // MatAssemblyEnd(Jpre, MAT_FINAL_ASSEMBLY);
+  MatAssemblyBegin(Ai, MAT_FINAL_ASSEMBLY);
+  MatAssemblyEnd(Ai, MAT_FINAL_ASSEMBLY);
 
-  // Print the matrix J
-  // MatView(J, PETSC_VIEWER_STDOUT_WORLD);
-  // MatView(Jpre, PETSC_VIEWER_STDOUT_WORLD);
+  MatView(Ai, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the matrix
 
-  // PetscInt size;
-  // VecGetSize(x, &size);
-  //
-  // MatZeroEntries(J); // Clear the matrix before setting it to identity
-  // for (PetscInt i = 0; i < size; ++i) {
-  //  MatSetValue(J, i, i, 1.0, INSERT_VALUES);
-  //}
-  // MatAssemblyBegin(J, MAT_FINAL_ASSEMBLY);
-  // MatAssemblyEnd(J, MAT_FINAL_ASSEMBLY);
-  //
-  // MatScale(J, -1.0);
-
-  return 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -249,21 +244,32 @@ void solve(Tao & tao, Context * ctx) {
   auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
   rhs.zero();
 
-  auto & J = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
+  auto & K = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("K"));
 
   TaoSetSolution(tao, x);
   TaoSetObjectiveAndGradient(tao, NULL, FormFunctionGradient, ctx);
-  TaoSetHessian(tao, J, J, FormHessian, ctx);
+  TaoSetHessian(tao, K, K, FormHessian, ctx);
 
-  // Set the constraint routine and its Jacobian
-  SolverVectorPETSc c(dof_manager, "c");
-  c.resize();
-  SparseMatrixPETSc Ji(dof_manager, _mt_not_defined, "Ji");
-  Ji.resize();
+  auto && mpi_comm = dof_manager.getMPIComm();
+  auto n = ctx->n;
+  auto ni = ctx->ni;
+  std::cout << "Number of DOFs: " << n << std::endl;
+  std::cout << "Number of inequality constraints: " << ni << std::endl;
 
-  TaoSetInequalityConstraintsRoutine(tao, c, EvaluateInequalityConstraints,
-                                     ctx);
-  TaoSetJacobianInequalityRoutine(tao, Ji, Ji, EvaluateInequalityJacobian, ctx);
+  VecCreate(mpi_comm, &ctx->ci);
+  VecSetSizes(ctx->ci, ni, ni);
+  VecSetFromOptions(ctx->ci);
+  VecSetUp(ctx->ci);
+
+  MatCreate(mpi_comm, &ctx->Ai);
+  MatSetSizes(ctx->Ai, ni, n, ni, n);
+  MatSetFromOptions(ctx->Ai);
+  MatSetUp(ctx->Ai);
+
+  TaoSetInequalityConstraintsRoutine(tao, ctx->ci,
+                                     EvaluateInequalityConstraints, ctx);
+  TaoSetJacobianInequalityRoutine(tao, ctx->Ai, ctx->Ai,
+                                  EvaluateInequalityJacobian, ctx);
 
   tss.predictor();
 
@@ -321,8 +327,8 @@ int main(int argc, char * argv[]) {
   model.dump();
 
   // Boundary conditions
-  model.applyBC(BC::Dirichlet::FixedValue(-1e-3, _y), "top");
-  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "left");
+  model.applyBC(BC::Dirichlet::FixedValue(-4e-3, _y), "top");
+  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "top");
 
   // Initialize the context
   TimeStepSolver & tss = dof_manager.getTimeStepSolver("static");
@@ -337,8 +343,8 @@ int main(int argc, char * argv[]) {
   TaoSetFromOptions(tao);
 
   // Set solver tolerances and maximum iterations
-  TaoSetTolerances(tao, 1e-3, 1e-3, 1e-3);
-  TaoSetMaximumIterations(tao, 1e3);
+  TaoSetTolerances(tao, 1e-1, 0, 0);
+  // TaoSetMaximumIterations(tao, 1e3);
 
   // Enable debugging output
   PetscOptionsSetValue(NULL, "-tao_monitor", NULL);
