@@ -41,6 +41,32 @@ void solve(Tao &, Ctx *);
 
 /* ----------------------------------------------------------------------- */
 
+// void interpolateSolutionOnFacets(ElementTypeMapArray<Real> & /*result*/,
+//                                  ElementTypeMapArray<Real> &
+//                                  /*by_elem_result*/, const GhostType
+//                                  ghost_type, SolidMechanicsModel & model) {
+void interpolateSolutionOnFacets(SolidMechanicsModel & model,
+                                 const GhostType ghost_type) {
+
+  auto & fem = model.getFEEngine();
+  const auto & mesh = model.getMesh();
+  const auto & mesh_facets = mesh.getMeshFacets();
+  const Material & mat = model.getMaterial(0); // To change when multiple
+                                               // materials are present
+
+  for (auto type : mat.getElementFilter().elementTypes(dim, ghost_type)) {
+    auto nb_element_full = mesh.getNbElement(type, ghost_type);
+
+    auto nb_interpolation_points_per_elem
+
+        const auto & facet_to_element =
+            mesh_facets.getSubelementToElement(type, ghost_type);
+    auto nb_facet_per_elem = facet_to_element.getNbComponent();
+  }
+}
+
+/* ----------------------------------------------------------------------- */
+
 void corrector(Vec x, Ctx * ctx) {
   auto & dof_manager = *ctx->dof_manager;
   auto & tss = *ctx->tss;
@@ -95,32 +121,6 @@ void assembleJacobian(Vec x, Mat K, Ctx * ctx) {
 
 /* ----------------------------------------------------------------------- */
 
-// PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
-//                                     Vec grad, void * ctx) {
-//   Ctx * context = static_cast<Ctx *>(ctx);
-//   auto & dof_manager = *context->dof_manager;
-//
-//   auto & K = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
-//   auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
-//
-//   assembleResidual(x, rhs, context);
-//   assembleJacobian(x, K, context);
-//   SolverVectorPETSc Kx(x, aka::as_type<DOFManagerPETSc>(dof_manager), "Kx");
-//
-//   Real fx;
-//   Real xKx;
-//
-//   MatMult(K, x, Kx);
-//   VecWAXPY(grad, 1, Kx, rhs);
-//   VecDot(rhs, x, &fx);
-//   VecDot(x, Kx, &xKx);
-//   *obj = 0.5 * xKx + fx;
-//
-//   return 0;
-// };
-
-/* ----------------------------------------------------------------------- */
-
 PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
                                     Vec grad, void * ctx) {
   // Extract the context
@@ -153,16 +153,6 @@ PetscErrorCode FormFunctionGradient(Tao /*tao*/, Vec x, PetscReal * obj,
   VecDot(x, Kx, &xKx);
   *obj = 0.5 * xKx - fx;
 
-  // VecView(x, PETSC_VIEWER_STDOUT_WORLD);
-  // VecView(rhs, PETSC_VIEWER_STDOUT_WORLD);
-  // MatView(K, PETSC_VIEWER_STDOUT_WORLD);
-  // VecView(Kx, PETSC_VIEWER_STDOUT_WORLD);
-  // VecView(grad, PETSC_VIEWER_STDOUT_WORLD);
-  // std::cout << "fx: " << fx << std::endl;
-  // std::cout << "xKx: " << xKx << std::endl;
-  // std::cout << "obj: " << *obj << std::endl;
-  // std::cout << "--------------------------------" << std::endl;
-
   return 0;
 }
 
@@ -192,16 +182,21 @@ PetscErrorCode FormInequalityConstraints(Tao /*tao*/, Vec x, Vec ci,
   VecGetValues(initial_positions, ni, constrained_dofs.data(),
                initial_pos.data());
   VecGetValues(x, ni, constrained_dofs.data(), current_displ.data());
-  for (PetscInt i = 0; i < ni; ++i) {
-    VecSetValue(ci, i, initial_pos[i] + current_displ[i], INSERT_VALUES);
-  }
+
+  Real quad_val = 0.5 * ((initial_pos[0] + current_displ[0]) +
+                         (initial_pos[1] + current_displ[1]));
+
+  VecSetValue(ci, 0, quad_val, INSERT_VALUES);
+  // for (PetscInt i = 0; i < ni; ++i) {
+  //   VecSetValue(ci, i, initial_pos[i] + current_displ[i], INSERT_VALUES);
+  // }
 
   // VecScale(ci, -1);
 
   VecAssemblyBegin(ci);
   VecAssemblyEnd(ci);
 
-  // VecView(ci, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the vector
+  VecView(ci, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the vector
 
   return 0;
 };
@@ -216,15 +211,17 @@ PetscErrorCode FormInequalityJacobian(Tao /*tao*/, Vec /*x*/, Mat Ai,
 
   MatZeroEntries(Ai);
 
-  for (PetscInt i = 0; i < ni; ++i) {
-    PetscInt dof = constrained_dofs[i];
-    MatSetValue(Ai, i, dof, 1.0, ADD_VALUES);
-  }
+  // for (PetscInt i = 0; i < ni - 1; ++i) {
+  //   PetscInt dof = constrained_dofs[i];
+  //   MatSetValue(Ai, i, dof, 1.0, ADD_VALUES);
+  // }
+  MatSetValue(Ai, 0, constrained_dofs[0], 0.5, ADD_VALUES);
+  MatSetValue(Ai, 0, constrained_dofs[1], 0.5, ADD_VALUES);
 
   MatAssemblyBegin(Ai, MAT_FINAL_ASSEMBLY);
   MatAssemblyEnd(Ai, MAT_FINAL_ASSEMBLY);
 
-  // MatView(Ai, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the matrix
+  MatView(Ai, PETSC_VIEWER_STDOUT_WORLD); // OPTIONAL: Print the matrix
 
   return 0;
 };
@@ -256,12 +253,12 @@ void initializeProblem(Ctx * ctx) {
   VecSetUp(ctx->initial_positions);
 
   VecCreate(mpi_comm, &ctx->ci);
-  VecSetSizes(ctx->ci, ctx->ni, ctx->ni);
+  VecSetSizes(ctx->ci, ctx->ni - 1, ctx->ni - 1);
   VecSetFromOptions(ctx->ci);
   VecSetUp(ctx->ci);
 
   MatCreate(mpi_comm, &ctx->Ai);
-  MatSetSizes(ctx->Ai, ctx->ni, ctx->n, ctx->ni, ctx->n);
+  MatSetSizes(ctx->Ai, ctx->ni - 1, ctx->n, ctx->ni - 1, ctx->n);
   MatSetFromOptions(ctx->Ai);
   MatSetUp(ctx->Ai);
 
@@ -298,6 +295,10 @@ void solve(Tao & tao, Ctx * ctx) {
 
   tss.assembleMatrix("J");
   auto & x = dynamic_cast<SolverVectorPETSc &>(dof_manager.getSolution());
+  // x.zero();
+  // auto & rhs = aka::as_type<SolverVectorPETSc>(dof_manager.getResidual());
+  // rhs.zero();
+  auto & K = aka::as_type<SparseMatrixPETSc>(dof_manager.getMatrix("J"));
 
   TaoSetSolution(tao, x);
   TaoSetObjectiveAndGradient(tao, NULL, FormFunctionGradient, ctx);
@@ -364,6 +365,9 @@ int main(int argc, char * argv[]) {
   model.initFull(_analysis_method = _static);
   TimeStepSolver & tss = dof_manager.getTimeStepSolver("static");
 
+  mesh.initMeshFacets();
+  interpolateSolutionOnFacets(model, _not_ghost);
+
   model.setBaseName("contact");
   model.addDumpFieldVector("displacement");
   model.addDumpField("external_force");
@@ -394,6 +398,7 @@ int main(int argc, char * argv[]) {
   PetscOptionsSetValue(NULL, "-tao_monitor", NULL);
   PetscOptionsSetValue(NULL, "-tao_smonitor", NULL);
   PetscOptionsSetValue(NULL, "-tao_view", NULL);
+
   // PetscOptionsSetValue(NULL, "-tao_almm_subsolver_tao_monitor", NULL);
   // PetscOptionsSetValue(NULL, "-tao_almm_subsolver_tao_ls_monitor", NULL);
 
@@ -404,7 +409,8 @@ int main(int argc, char * argv[]) {
   // Optionally set penalty parameters
   // PetscOptionsSetValue(NULL, "-tao_almm_penalty_initial", "10.0");
   // PetscOptionsSetValue(NULL, "-tao_almm_penalty_multiplier", "2.0");
-  solve(tao, &ctx);
+
+  // solve(tao, &ctx);
   model.assembleInternalForces();
   model.dump();
 

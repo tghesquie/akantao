@@ -272,11 +272,10 @@ int main(int argc, char * argv[]) {
   // Boundary conditions
   Vector<Real> traction(dim);
   traction.zero();
-  traction(_y) = -5e2;
-  model.applyBC(BC::Dirichlet::FixedValue(2e-3, _y), "top");
-  // model.applyBC(BC::Neumann::FromTraction(traction), "top");
-  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "top");
-  // model.applyBC(BC::Dirichlet::FixedValue(1e-3, _x), "right");
+  traction(_y) = -2e2;
+  // model.applyBC(BC::Dirichlet::FixedValue(2e-3, _y), "top");
+  model.applyBC(BC::Neumann::FromTraction(traction), "top");
+  model.applyBC(BC::Dirichlet::FixedValue(0.0, _x), "left");
 
   // Initialize the context
   TimeStepSolver & tss = dof_manager.getTimeStepSolver("static");
@@ -303,10 +302,11 @@ int main(int argc, char * argv[]) {
   PetscOptionsSetValue(NULL, "-tao_monitor", NULL);
   PetscOptionsSetValue(NULL, "-tao_view", NULL);
 
-  tss.beforeSolveStep();
+  // Solve the problem
   solve(tao, &ctx);
-  tss.afterSolveStep(true);
 
+  // COmpute the stresses and dump the results
+  model.assembleInternalForces();
   model.dump();
 
   TaoDestroy(&tao);
