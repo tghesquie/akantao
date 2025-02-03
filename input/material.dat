@@ -1,0 +1,6 @@
+material elastic [
+    name = test
+    rho = 1.0   # density
+    E   = 1e3   # young's modulu
+    nu  = 0.3   # poisson's ratio
+]

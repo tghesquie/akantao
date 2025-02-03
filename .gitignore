@@ -54,14 +54,13 @@ Makefile
 
 # Ignore directories
 build/
-input/
 
 # Ignore the virtual environment directory
 .venv/
 
 # Mesh and material files
-*.msh
-*.dat
+#*.msh
+#*.dat
 *.geo
 
 # Ignore clang format files
